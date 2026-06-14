@@ -20,6 +20,9 @@
   --red-bg:     #fcebeb;
   --red-text:   #791f1f;
   --info:       #2563eb;
+  --green-border: rgba(29,158,117,0.2);
+  --red-border:   rgba(226,75,74,0.25);
+  --red-border-strong: rgba(226,75,74,0.4);
 
   /* ── type ───────────────────────────────────────────────── */
   --font-ui:   'Inter', system-ui, sans-serif;

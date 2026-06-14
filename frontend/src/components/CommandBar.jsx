@@ -1,5 +1,16 @@
 import SegmentedControl from './SegmentedControl.jsx'
 
+/* Two-bar mark: short dim bar (stale) / tall green bar (fresh) */
+function LogoMark() {
+  return (
+    <svg width="14" height="16" viewBox="0 0 14 16" fill="none" aria-hidden="true" style={{ flexShrink: 0 }}>
+      <rect x="0" y="6" width="5" height="10" rx="1.5" fill="var(--border-strong)" />
+      <rect x="9" y="0" width="5" height="16" rx="1.5" fill="var(--green)" />
+      <path d="M5 11 L9 5" stroke="var(--border-strong)" strokeWidth="1" strokeLinecap="round" strokeDasharray="1.5 2" />
+    </svg>
+  )
+}
+
 const fmt = (ms) => {
   if (ms == null) return '—'
   const s = Math.round(ms / 1000)
@@ -21,8 +32,9 @@ export default function CommandBar({ mode, onMode, ttf, onRebuild }) {
       borderBottom: '1px solid var(--border)',
     }}>
       {/* wordmark */}
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--s-3)' }}>
-        <span className="mono" style={{ fontWeight: 500, fontSize: 'var(--fs-14)', letterSpacing: '-0.01em' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--s-3)' }}>
+        <LogoMark />
+        <span className="mono" style={{ fontWeight: 500, fontSize: 'var(--fs-14)', letterSpacing: '-0.01em', lineHeight: 1 }}>
           freshness-lab
         </span>
         <span style={{ color: 'var(--text-3)', fontSize: 'var(--fs-12)' }}>

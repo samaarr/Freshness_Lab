@@ -37,24 +37,27 @@ const AVAIL_OPTIONS = [
 
 /* ── animation steps for each data-path scenario ────────── */
 const FLOW_STEPS = {
+  /* factual-live: 900+1000+900 = 2800ms total */
   'factual-live': [
-    { node: 'fact-card',     caption: 'status changed',                                          ms: 450 },
-    { node: 'snap-bypassed', caption: 'snapshot bypassed — live mode re-reads field directly',   ms: 500 },
-    { node: 'fork-right',    caption: 're-read live field → answer correct',                     ms: 450 },
+    { node: 'fact-card',     caption: 'status changed',                                          ms: 900  },
+    { node: 'snap-bypassed', caption: 'snapshot bypassed — live mode re-reads field directly',   ms: 1000 },
+    { node: 'fork-right',    caption: 're-read live field → answer correct',                     ms: 900  },
   ],
+  /* factual-baseline: 900+1100 = 2000ms total */
   'factual-baseline': [
-    { node: 'fact-card',     caption: 'status changed',                                          ms: 450 },
-    { node: 'snap-stale',    caption: 'snapshot not updated — baseline queues the change',       ms: 650 },
+    { node: 'fact-card',     caption: 'status changed',                                          ms: 900  },
+    { node: 'snap-stale',    caption: 'snapshot not updated — baseline queues the change',       ms: 1100 },
   ],
+  /* semantic: 900+1000 = 1900ms total */
   'semantic': [
-    { node: 'recipe-card',   caption: 'runbook_text changed',                                    ms: 450 },
-    { node: 'vector-card',   caption: 're-embed fired → new vector in index',                    ms: 500 },
+    { node: 'recipe-card',   caption: 'runbook_text changed',                                    ms: 900  },
+    { node: 'vector-card',   caption: 're-embed fired → new vector in index',                    ms: 1000 },
   ],
   'switch-live': [
-    { node: 'snap-bypassed', caption: 'live mode — agent bypasses snapshot, re-reads live field', ms: 650 },
+    { node: 'snap-bypassed', caption: 'live mode — agent bypasses snapshot, re-reads live field', ms: 1000 },
   ],
   'switch-baseline': [
-    { node: 'snap-stale',    caption: 'baseline mode — snapshot served as-is until rebuild',     ms: 650 },
+    { node: 'snap-stale',    caption: 'baseline mode — snapshot served as-is until rebuild',     ms: 1000 },
   ],
 }
 
@@ -203,11 +206,11 @@ export default function DivergenceView({ services, mode, extraSeconds, onChanged
 
   /* ── render ────────────────────────────────────────────── */
   return (
-    <div style={{ maxWidth: 920, margin: '0 auto', padding: '0 var(--s-5) var(--s-7)' }}>
+    <div style={{ maxWidth: 1200, margin: '0 auto', padding: '0 var(--s-5) var(--s-7)' }}>
 
       {/* ── intro sentence ───────────────────────────────── */}
       <p style={{
-        marginTop: 'var(--s-5)', marginBottom: 0,
+        marginTop: 'var(--s-4)', marginBottom: 0,
         fontSize: 'var(--fs-13h)', color: 'var(--text-2)', lineHeight: 1.65, maxWidth: 700,
       }}>
         When a stored fact changes, the document's served value and its vector embedding must both stay in sync.
@@ -269,7 +272,7 @@ export default function DivergenceView({ services, mode, extraSeconds, onChanged
         {/* served value: snapshot_text — lights up red (stale) or dim (bypassed) */}
         <div style={{
           ...card,
-          borderColor: (stale && !live) ? 'rgba(226,75,74,0.4)' : 'var(--border)',
+          borderColor: (stale && !live) ? 'var(--red-border-strong)' : 'var(--border)',
           transition: 'border-color var(--duration-heal) var(--ease)',
           ...snapFlowStyle,
         }}>
@@ -283,7 +286,7 @@ export default function DivergenceView({ services, mode, extraSeconds, onChanged
               <div className="status-transition" style={{
                 flexShrink: 0, textAlign: 'center',
                 background: live ? 'var(--bg-page)' : 'var(--red-bg)',
-                border: `1px solid ${live ? 'var(--border)' : 'rgba(226,75,74,0.25)'}`,
+                border: `1px solid ${live ? 'var(--border)' : 'var(--red-border)'}`,
                 borderRadius: 'var(--radius)', padding: '6px 10px',
               }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 5, justifyContent: 'center' }}>
@@ -334,7 +337,7 @@ export default function DivergenceView({ services, mode, extraSeconds, onChanged
             <span className="mono status-transition" style={{
               display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0,
               background: 'var(--green-bg)', color: 'var(--green-text)',
-              border: '1px solid rgba(29,158,117,0.2)',
+              border: '1px solid var(--green-border)',
               borderRadius: 'var(--radius-sm)', padding: '4px 9px',
               fontSize: 'var(--fs-11h)',
             }}>
@@ -371,7 +374,7 @@ export default function DivergenceView({ services, mode, extraSeconds, onChanged
           display: 'flex', alignItems: 'center', gap: 'var(--s-3)',
           padding: '9px var(--s-4)',
           background: 'var(--green-bg)',
-          border: '1px solid rgba(29,158,117,0.2)',
+          border: '1px solid var(--green-border)',
           borderRadius: 'var(--radius)',
           marginBottom: 'var(--s-5)',
         }}>
@@ -519,7 +522,7 @@ export default function DivergenceView({ services, mode, extraSeconds, onChanged
                 </div>
                 <div style={{
                   background: 'var(--bg-card)',
-                  border: `1px solid ${answerWrong(m.provenance) ? 'rgba(226,75,74,0.4)' : 'var(--border)'}`,
+                  border: `1px solid ${answerWrong(m.provenance) ? 'var(--red-border-strong)' : 'var(--border)'}`,
                   borderRadius: 'var(--radius)', borderTopLeftRadius: 'var(--radius-sm)',
                   padding: '9px 14px',
                   transition: 'border-color var(--duration-heal) var(--ease)',
@@ -636,7 +639,7 @@ function ForkColumn({ heading, tech, status, ok, verdictLine, body, bodyMono, is
     : correct ? 'rgba(29,158,117,0.06)' : 'rgba(226,75,74,0.05)'
   const border = empty
     ? 'var(--border)'
-    : correct ? 'rgba(29,158,117,0.22)' : 'rgba(226,75,74,0.22)'
+    : correct ? 'rgba(29,158,117,0.22)' : 'rgba(226,75,74,0.22)'  /* tinted, intentional — no token needed */
 
   const litStyle = isLit
     ? { boxShadow: '0 0 0 2px #1d9e75, 0 0 14px rgba(29,158,117,0.10)', transition: 'box-shadow 150ms var(--ease)' }
@@ -805,7 +808,7 @@ function Eyebrow({ n, label, top }) {
       textTransform: 'uppercase',
       color: 'var(--text-2)',
       marginBottom: 'var(--s-4)',
-      marginTop: top ? 'var(--s-5)' : 'var(--s-7)',
+      marginTop: top ? 'var(--s-4)' : 'var(--s-5)',
     }}>
       {n} · {label}
     </div>
@@ -816,11 +819,11 @@ function Eyebrow({ n, label, top }) {
 function TwoHairlines({ caption }) {
   return (
     <div className="two-hairlines" style={{ position: 'relative', alignItems: 'center' }}>
-      <div style={{ display: 'flex', justifyContent: 'center', padding: '10px 0' }}>
-        <div style={{ width: 1, height: 24, background: 'var(--border-strong)' }} />
+      <div style={{ display: 'flex', justifyContent: 'center', padding: '6px 0' }}>
+        <div style={{ width: 1, height: 14, background: 'var(--border-strong)' }} />
       </div>
-      <div style={{ display: 'flex', justifyContent: 'center', padding: '10px 0' }}>
-        <div style={{ width: 1, height: 24, background: 'var(--border-strong)' }} />
+      <div style={{ display: 'flex', justifyContent: 'center', padding: '6px 0' }}>
+        <div style={{ width: 1, height: 14, background: 'var(--border-strong)' }} />
       </div>
       {caption && (
         <div style={{
@@ -846,8 +849,8 @@ function TwoHairlines({ caption }) {
 
 function SingleHairline() {
   return (
-    <div style={{ display: 'flex', justifyContent: 'center', padding: '10px 0' }}>
-      <div style={{ width: 1, height: 24, background: 'var(--border-strong)' }} />
+    <div style={{ display: 'flex', justifyContent: 'center', padding: '6px 0' }}>
+      <div style={{ width: 1, height: 14, background: 'var(--border-strong)' }} />
     </div>
   )
 }
