@@ -1,0 +1,159 @@
+/* Design tokens — the ONLY place colors/type/spacing are defined (BRIEF §6.8) */
+:root {
+  /* ── neutrals (Stripe-status lightness) ──────────────────── */
+  --bg-page: #f5f4f1;
+  --bg-card: #ffffff;
+  --border:  rgba(0,0,0,0.08);
+  --border-strong: rgba(0,0,0,0.15);
+  --text-1: #1a1a18;
+  --text-2: #6b6961;
+  --text-3: #9b988f;
+
+  /* ── status (functional only — zero decorative use) ─────── */
+  --green:      #1d9e75;
+  --green-bg:   #e1f5ee;
+  --green-text: #11614a;
+  --amber:      #ba7517;
+  --amber-bg:   #faeeda;
+  --amber-text: #7a4c0c;
+  --red:        #e24b4a;
+  --red-bg:     #fcebeb;
+  --red-text:   #791f1f;
+  --info:       #2563eb;
+
+  /* ── type ───────────────────────────────────────────────── */
+  --font-ui:   'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  /* scale: 26 / 20 / 15 / 13.5 / 11.5 */
+  --fs-11:  11px;
+  --fs-11h: 11.5px;
+  --fs-12:  12px;
+  --fs-13:  13px;
+  --fs-13h: 13.5px;
+  --fs-14:  14px;
+  --fs-15:  15px;
+  --fs-16:  16px;
+  --fs-20:  20px;
+  --fs-26:  26px;
+  --fs-28:  28px;
+
+  /* ── spacing (8-pt scale: 8/16/24/32/48) ───────────────── */
+  --s-2: 8px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+  --s-7: 48px;
+  /* kept for legacy callsites — alias to nearest 8-pt */
+  --s-1: 4px;
+  --s-3: 12px;
+
+  /* ── anatomy ────────────────────────────────────────────── */
+  --card-pad:   24px;
+  --lane-gap:   24px;
+  --section-gap: 48px;
+  --radius-sm:  4px;
+  --radius:     8px;
+  --radius-lg:  12px;
+  --radius-pill: 9999px;
+
+  /* ── motion ─────────────────────────────────────────────── */
+  --ease:           cubic-bezier(0.2, 0, 0, 1);
+  --duration-fast:  120ms;
+  --duration-med:   200ms;
+  --duration-heal:  300ms;  /* stale→fresh badge transition */
+
+  /* ── focus ring ─────────────────────────────────────────── */
+  --ring: 0 0 0 3px rgba(37,99,235,0.22);
+}
+
+/* ── reset ──────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg-page);
+  color: var(--text-1);
+  font-family: var(--font-ui);
+  font-size: var(--fs-13h);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+button  { font-family: inherit; cursor: pointer; }
+input, textarea, select { font-family: inherit; font-size: var(--fs-13h); }
+
+/* ── typography helpers ─────────────────────────────────── */
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── two-col responsive grid ────────────────────────────── */
+.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--lane-gap);
+}
+@media (max-width: 760px) {
+  .two-col { grid-template-columns: 1fr; }
+  .two-hairlines { grid-template-columns: 1fr; }
+}
+.two-hairlines {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+
+/* ── focus ring ─────────────────────────────────────────── */
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+/* ── shared control transitions ────────────────────────── */
+.btn-seg {
+  transition: background var(--duration-fast) var(--ease),
+              color var(--duration-fast) var(--ease);
+}
+.btn-ghost {
+  transition: background var(--duration-fast) var(--ease),
+              border-color var(--duration-fast) var(--ease);
+}
+.btn-ghost:hover  { background: var(--bg-page); border-color: var(--border-strong); }
+.btn-primary      { transition: filter var(--duration-fast) var(--ease); }
+.btn-primary:hover { filter: brightness(1.06); }
+.chip-pill {
+  transition: background var(--duration-fast) var(--ease),
+              border-color var(--duration-fast) var(--ease);
+}
+.chip-pill:hover  { background: var(--bg-page); border-color: var(--text-3); }
+.link-quiet       { transition: color var(--duration-fast) var(--ease); }
+.link-quiet:hover { color: var(--info); }
+
+/* ── status value transition (heal moment) ──────────────── */
+.status-transition {
+  transition:
+    background  var(--duration-heal) var(--ease),
+    color       var(--duration-heal) var(--ease),
+    border-color var(--duration-heal) var(--ease);
+}
+
+/* ── inspector slide-in ─────────────────────────────────── */
+@keyframes slideInRight {
+  from { transform: translateX(100%); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+.inspector-panel {
+  animation: slideInRight var(--duration-med) var(--ease);
+}
+
+/* ── thinking spinner ───────────────────────────────────── */
+@keyframes spin { to { transform: rotate(360deg); } }
+.spin { animation: spin 700ms linear infinite; }
+
+/* ── styled select (cross-browser) ─────────────────────── */
+.styled-select {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+}

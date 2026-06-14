@@ -1,0 +1,147 @@
+"""Freshness pipeline — router, sync logic, ledger, rebuild.
+
+Routes (from classifier):
+  semantic -> re-embed runbook_text, refresh snapshot, bump embedding_version (Mechanism A fix)
+  factual  -> NO re-embed, NO version bump; refresh snapshot_text only (Mechanism B fix)
+The pipeline's own writes touch only PIPELINE_FIELDS, so the watcher classifies
+them as "ignore" — the infinite-loop guard lives in that contract.
+"""
+from datetime import datetime, timezone
+
+import db
+import events
+from classifier import classify
+from config import COLLECTION_BENCH  # noqa: F401  (re-exported for benchmark)
+from embedder import get_embedder
+from snapshot import content_hash, render_snapshot
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _norm(dt: datetime | None) -> datetime | None:
+    """Ensure datetime is timezone-aware (UTC). Atlas clusterTime is tz-aware;
+    utcnow() is also tz-aware; but Mongo may return naive datetimes from
+    stored documents — normalise all of them here so subtraction never fails."""
+    if dt is None:
+        return dt
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _ledger_insert(doc_name: str, field_class: str, changed_fields: list[str],
+                   mode: str, changed_at: datetime, synced_at: datetime | None,
+                   v_before: int, v_after: int) -> None:
+    changed_at = _norm(changed_at)
+    synced_at  = _norm(synced_at)
+    ttf_ms = int((synced_at - changed_at).total_seconds() * 1000) if synced_at else None
+    db.ledger().insert_one({
+        "doc_name": doc_name,
+        "field_class": field_class,
+        "changed_fields": changed_fields,
+        "mode": mode,
+        "changed_at": changed_at,
+        "synced_at": synced_at,
+        "ttf_ms": ttf_ms,
+        "embedding_version_before": v_before,
+        "embedding_version_after": v_after,
+    })
+
+
+def sync_semantic(doc: dict) -> dict:
+    """Mechanism A fix: re-embed from runbook_text only."""
+    emb = get_embedder()
+    now = utcnow()
+    new_version = int(doc.get("embedding_version", 0)) + 1
+    update = {
+        "embedding": emb.embed(doc["runbook_text"]),
+        "embedding_version": new_version,
+        "embedded_at": now,
+        "content_hash": content_hash(doc["runbook_text"]),
+        "snapshot_text": render_snapshot(doc),
+    }
+    db.services().update_one({"name": doc["name"]}, {"$set": update})
+    return {**doc, **update}
+
+
+def sync_factual(doc: dict) -> dict:
+    """Mechanism B fix: refresh the served snapshot; the vector is untouched."""
+    new_snapshot = render_snapshot(doc)
+    db.services().update_one({"name": doc["name"]}, {"$set": {"snapshot_text": new_snapshot}})
+    return {**doc, "snapshot_text": new_snapshot}
+
+
+def handle_change(doc_name: str, changed_fields: set[str], full_doc: dict,
+                  mode: str, changed_at: datetime | None = None) -> str:
+    """Called by the watcher for every update event. Returns the route taken."""
+    route = classify(changed_fields)
+    if route == "ignore":
+        return route
+
+    changed_at = _norm(changed_at or utcnow())
+    v_before = int(full_doc.get("embedding_version", 0))
+
+    if mode == "live":
+        if route == "semantic":
+            updated = sync_semantic(full_doc)
+        else:
+            updated = sync_factual(full_doc)
+        synced_at = utcnow()
+        v_after = int(updated.get("embedding_version", v_before))
+        _ledger_insert(doc_name, route, sorted(changed_fields), mode, changed_at, synced_at, v_before, v_after)
+    else:
+        # baseline: observe + record the debt; sync happens only on /api/rebuild
+        _ledger_insert(doc_name, route, sorted(changed_fields), mode, changed_at, None, v_before, v_before)
+
+    events.publish("freshness", {"doc_name": doc_name, "route": route, "mode": mode})
+    return route
+
+
+def rebuild_all() -> dict:
+    """Baseline-mode 'scheduled backfill': sync every doc, stamp all pending ledger rows."""
+    synced_at = utcnow()
+    count = 0
+    for doc in db.services().find({}):
+        sync_semantic(doc)  # full rebuild re-embeds everything (the expensive, honest baseline)
+        count += 1
+    pending = list(db.ledger().find({"synced_at": None}))
+    for row in pending:
+        changed_at = _norm(row["changed_at"])
+        ttf_ms = int((synced_at - changed_at).total_seconds() * 1000)
+        db.ledger().update_one(
+            {"_id": row["_id"]},
+            {"$set": {"synced_at": synced_at, "ttf_ms": ttf_ms}}
+        )
+    events.publish("rebuild", {"docs": count, "pending_closed": len(pending)})
+    return {"docs_rebuilt": count, "pending_closed": len(pending), "synced_at": synced_at.isoformat()}
+
+
+def freshness_state() -> list[dict]:
+    """Per-doc current freshness for the UI chips. Derived from pending ledger rows."""
+    now = utcnow()
+    pending: dict[str, dict] = {}
+    for row in db.ledger().find({"synced_at": None}).sort("changed_at", 1):
+        entry = pending.setdefault(row["doc_name"], {"factual": None, "semantic": None, "updates_behind": 0})
+        cls = row["field_class"]
+        if entry[cls] is None:
+            entry[cls] = row["changed_at"]
+        entry["updates_behind"] += 1
+
+    out = []
+    for doc in db.services().find({}, {"_id": 0, "embedding": 0}):
+        p = pending.get(doc["name"], {"factual": None, "semantic": None, "updates_behind": 0})
+        def age(ts):
+            if ts is None:
+                return None
+            t = _norm(ts)
+            return int((now - t).total_seconds())
+        out.append({
+            "name": doc["name"],
+            "status": doc["status"],
+            "price": doc.get("price", "n/a"),
+            "facts_behind_s": age(p["factual"]),
+            "search_behind_s": age(p["semantic"]),
+            "updates_behind": p["updates_behind"],
+            "embedding_version": doc.get("embedding_version"),
+        })
+    return out
