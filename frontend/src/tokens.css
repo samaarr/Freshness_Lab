@@ -25,7 +25,7 @@
   --red-border-strong: rgba(226,75,74,0.4);
 
   /* ── type ───────────────────────────────────────────────── */
-  --font-ui:   'Inter', system-ui, sans-serif;
+  --font-ui:   'Manrope', system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, monospace;
   /* scale: 26 / 20 / 15 / 13.5 / 11.5 */
   --fs-11:  11px;

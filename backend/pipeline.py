@@ -6,6 +6,7 @@ Routes (from classifier):
 The pipeline's own writes touch only PIPELINE_FIELDS, so the watcher classifies
 them as "ignore" — the infinite-loop guard lives in that contract.
 """
+import time
 from datetime import datetime, timezone
 
 import db
@@ -34,7 +35,7 @@ def _ledger_insert(doc_name: str, field_class: str, changed_fields: list[str],
                    v_before: int, v_after: int) -> None:
     changed_at = _norm(changed_at)
     synced_at  = _norm(synced_at)
-    ttf_ms = int((synced_at - changed_at).total_seconds() * 1000) if synced_at else None
+    ttf_ms = max(0, int((synced_at - changed_at).total_seconds() * 1000)) if synced_at else None
     db.ledger().insert_one({
         "doc_name": doc_name,
         "field_class": field_class,
@@ -53,10 +54,14 @@ def sync_semantic(doc: dict) -> dict:
     emb = get_embedder()
     now = utcnow()
     new_version = int(doc.get("embedding_version", 0)) + 1
+    t0 = time.perf_counter()
+    embedding = emb.embed(doc["runbook_text"])
+    embed_ms = int((time.perf_counter() - t0) * 1000)
     update = {
-        "embedding": emb.embed(doc["runbook_text"]),
+        "embedding": embedding,
         "embedding_version": new_version,
         "embedded_at": now,
+        "embed_ms": embed_ms,
         "content_hash": content_hash(doc["runbook_text"]),
         "snapshot_text": render_snapshot(doc),
     }
@@ -97,6 +102,18 @@ def handle_change(doc_name: str, changed_fields: set[str], full_doc: dict,
     return route
 
 
+def reset_all() -> dict:
+    """Demo reset: re-embed all docs from current state, wipe entire ledger so TTF starts fresh."""
+    now = utcnow()
+    count = 0
+    for doc in db.services().find({}):
+        sync_semantic(doc)
+        count += 1
+    deleted = db.ledger().delete_many({}).deleted_count
+    events.publish("reset", {"docs": count, "ledger_cleared": deleted})
+    return {"docs_reset": count, "ledger_cleared": deleted, "reset_at": now.isoformat()}
+
+
 def rebuild_all() -> dict:
     """Baseline-mode 'scheduled backfill': sync every doc, stamp all pending ledger rows."""
     synced_at = utcnow()
@@ -107,7 +124,7 @@ def rebuild_all() -> dict:
     pending = list(db.ledger().find({"synced_at": None}))
     for row in pending:
         changed_at = _norm(row["changed_at"])
-        ttf_ms = int((synced_at - changed_at).total_seconds() * 1000)
+        ttf_ms = max(0, int((synced_at - changed_at).total_seconds() * 1000))
         db.ledger().update_one(
             {"_id": row["_id"]},
             {"$set": {"synced_at": synced_at, "ttf_ms": ttf_ms}}
@@ -135,6 +152,7 @@ def freshness_state() -> list[dict]:
                 return None
             t = _norm(ts)
             return int((now - t).total_seconds())
+        embedded_at_dt = _norm(doc.get("embedded_at"))
         out.append({
             "name": doc["name"],
             "status": doc["status"],
@@ -143,5 +161,8 @@ def freshness_state() -> list[dict]:
             "search_behind_s": age(p["semantic"]),
             "updates_behind": p["updates_behind"],
             "embedding_version": doc.get("embedding_version"),
+            "embedded_at": embedded_at_dt.isoformat() if embedded_at_dt else None,
+            "embed_ms": doc.get("embed_ms"),
+            "content_fresh": doc.get("content_hash") == content_hash(doc["runbook_text"]),
         })
     return out

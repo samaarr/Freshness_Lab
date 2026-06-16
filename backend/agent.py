@@ -88,6 +88,10 @@ def ask(question: str) -> dict:
         snapshot_age_s = int((pipeline.utcnow() - t).total_seconds())
 
     truth = db.services().find_one({"name": doc["name"]}, {"_id": 0, "status": 1, "embedding_version": 1, "updated_at": 1})
+    latest_synced = db.ledger().find_one(
+        {"doc_name": doc["name"], "synced_at": {"$ne": None}},
+        sort=[("synced_at", -1)],
+    )
     provenance = {
         "question": question,
         "retrieved_doc": doc["name"],
@@ -99,6 +103,7 @@ def ask(question: str) -> dict:
         "context_status": None,
         "truth_status": truth["status"] if truth else None,
         "truth_version": truth.get("embedding_version") if truth else None,
+        "ttf_ms": latest_synced.get("ttf_ms") if latest_synced else None,
     }
     # status as stated in the context the model saw (for the inspector compare card)
     for s in ("sold_out", "limited", "available"):

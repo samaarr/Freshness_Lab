@@ -1,4 +1,4 @@
-const BASE = import.meta.env.VITE_API_URL || '';
+const BASE = import.meta.env.VITE_API_BASE || '';
 
 async function j(method, path, body) {
   const res = await fetch(`${BASE}${path}`, {
@@ -15,6 +15,7 @@ export const api = {
   mode: () => j('GET', '/api/mode'),
   setMode: (mode) => j('POST', '/api/mode', { mode }),
   patchService: (name, patch) => j('PATCH', `/api/services/${name}`, patch),
+  reset:   () => j('POST', '/api/reset'),
   rebuild: () => j('POST', '/api/rebuild'),
   ask: (question) => j('POST', '/api/ask', { question }),
   benchResults: () => j('GET', '/api/benchmark/results'),

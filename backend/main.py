@@ -90,6 +90,11 @@ def set_mode(req: ModeRequest):
         raise HTTPException(422, str(exc))
 
 
+@app.post("/api/reset")
+def reset_demo():
+    return pipeline.reset_all()
+
+
 @app.post("/api/rebuild")
 def rebuild():
     return pipeline.rebuild_all()

@@ -1,49 +1,113 @@
 """Benchmark harness — deterministic scenarios, exact-match grading, one JSON out.
 
 Per trial, TWO booleans (the thesis pair):
-  retrieval_hit  — did $vectorSearch return the expected doc?
+  retrieval_hit  — did $vectorSearch return the expected dish?
   answer_correct — did the parsed STATUS match ground truth at ask time?
 Scenarios:
-  mechanism_b — status flips; expect retrieval flat, correctness collapsing (baseline)
-  mechanism_a — runbook edits; expect both degrading (baseline)
-  control     — zero staleness (live mode); establishes the fresh-but-wrong floor
+  mechanism_b — status flips; staggered across lag_points.
+                retrieval stays flat (embedding unchanged); correctness slopes down.
+  mechanism_a — runbook rewrites; staggered + mid-rebuild each time.
+                Old recipe queries progressively miss the updated embeddings;
+                both retrieval and correctness decline together.
+  control     — live mode, fully fresh; both lines flat near 100%.
 """
 import random
 import time
-from datetime import timezone
 
 import db
 import mode as mode_state
 import pipeline
 from agent import retrieve, compose_context, call_claude
 from config import COLLECTION_BENCH
-from grading import grade, parse_status
+from grading import parse_status
 
+# ── query sets ────────────────────────────────────────────────────────────────
+
+# Name-based queries — used by Mechanism B and Control.
+# These find the right dish by name even when the recipe text changes.
 QUERY_SET = [
-    ("Is checkout healthy?", "checkout"),
-    ("What is the current status of checkout?", "checkout"),
-    ("Is the payments API up right now?", "payments-api"),
-    ("Are payments degraded?", "payments-api"),
-    ("Can users log in — is auth-service up?", "auth-service"),
-    ("Is the inventory service operational?", "inventory"),
-    ("Are notifications being sent — service status?", "notifications"),
-    ("Is search working — what is search-api status?", "search-api"),
+    ("Is the risotto available tonight?",      "risotto"),
+    ("Can I order the risotto?",               "risotto"),
+    ("Is carbonara on the menu?",              "carbonara"),
+    ("Is carbonara available?",                "carbonara"),
+    ("Can I get bruschetta?",                  "bruschetta"),
+    ("Is bruschetta available tonight?",       "bruschetta"),
+    ("Is margherita pizza available?",         "margherita"),
+    ("Is tiramisu available for dessert?",     "tiramisu"),
 ]
 
-FLIP_TARGETS = ["checkout", "payments-api", "auth-service", "inventory"]
+# Semantic queries about ORIGINAL recipe content — used by Mechanism A.
+# After a runbook rewrite + rebuild, the embedding shifts and these old queries miss.
+QUERY_SET_A = [
+    ("Which Italian rice dish is slow-cooked with saffron and parmesan?",   "risotto"),
+    ("What dish uses white wine, arborio rice, and butter?",                "risotto"),
+    ("Which pasta has a rich sauce made from cured pork and egg yolk?",     "carbonara"),
+    ("What Roman pasta is finished with guanciale and pecorino?",           "carbonara"),
+    ("Which starter features fresh tomatoes on grilled bread with garlic?", "bruschetta"),
+    ("What Italian antipasto uses olive oil and fresh basil on toast?",     "bruschetta"),
+    ("Which thin pizza has only tomato sauce and fresh mozzarella?",        "margherita"),
+    ("What Italian dessert is made with espresso-soaked ladyfingers?",      "tiramisu"),
+]
 
+FLIP_TARGETS = ["risotto", "carbonara", "bruschetta", "margherita"]
+
+# Original runbook texts — used to restore the DB to a clean state before each run
+# so that mechanism_b status flips and mechanism_a rewrites always start from a
+# known baseline (not whatever a previous run left behind).
+ORIGINAL_RUNBOOKS = {
+    "risotto": (
+        "Risotto — creamy arborio rice slow-cooked with white wine and vegetable stock, "
+        "finished with parmesan, saffron, and butter. Vegetarian."
+    ),
+    "carbonara": (
+        "Carbonara — spaghetti tossed with guanciale, raw egg yolk, pecorino romano, "
+        "and cracked black pepper. No cream. Finished off the heat so the egg stays silky. "
+        "Contains egg and pork."
+    ),
+    "bruschetta": (
+        "Bruschetta — grilled sourdough rubbed with raw garlic, topped with marinated "
+        "San Marzano tomatoes, fresh basil, sea salt, and extra-virgin olive oil. Vegan. "
+        "Contains gluten."
+    ),
+    "margherita": (
+        "Margherita — wood-fired pizza with San Marzano tomato base, fresh fior di latte "
+        "mozzarella, basil, and olive oil on a 48-hour fermented dough. Vegetarian. "
+        "Contains gluten and dairy."
+    ),
+}
+
+# Rewrites deliberately omit the dish's own name so the embedding shifts away
+# from the original; old recipe queries can no longer find the right document.
+MECH_A_REWRITES = {
+    "risotto": (
+        "Seasonal grain bowl — slow-cooked farro with porcini mushrooms, chanterelles, "
+        "and aged pecorino. Hearty and warming. Available vegan with cashew cream. "
+        "No rice, no saffron."
+    ),
+    "carbonara": (
+        "Braised noodle dish — house-made pasta slow-cooked with wild boar ragù, "
+        "san marzano tomatoes, and fresh basil. No eggs or cured pork. Rich and hearty."
+    ),
+    "bruschetta": (
+        "Focaccia board — thick-cut house bread with whipped ricotta, local honey, "
+        "and candied walnuts. No tomatoes or garlic. Sweet and savory shared plate."
+    ),
+    "margherita": (
+        "Umami flatbread — thin-crust base with caramelised onion, gorgonzola, "
+        "and toasted pine nuts. No tomato sauce or mozzarella. Rich and savoury."
+    ),
+}
+
+
+# ── helpers ────────────────────────────────────────────────────────────────────
 
 def _snapshot_truths() -> dict[str, str]:
-    """Read ground-truth statuses RIGHT NOW from Atlas — call before any rebuild."""
+    """Current ground-truth status for every dish — read before any rebuild."""
     return {doc["name"]: doc["status"] for doc in db.services().find({}, {"name": 1, "status": 1})}
 
 
-def _ask_graded(question: str, expected_service: str, mode: str, truths: dict[str, str]) -> dict:
-    """
-    truths: ground-truth status snapshot taken at query time (before any rebuild).
-    This is the fix: we pass in the truth rather than re-reading from Atlas after
-    rebuild has already restored everything to 'up'.
-    """
+def _ask_graded(question: str, expected_service: str, mode: str,
+                truths: dict[str, str]) -> dict:
     doc = retrieve(question)
     retrieval_hit = bool(doc and doc["name"] == expected_service)
     answer_correct = False
@@ -53,77 +117,106 @@ def _ask_graded(question: str, expected_service: str, mode: str, truths: dict[st
         answer = call_claude(question, context)
         parsed = parse_status(answer)
         truth = truths.get(expected_service, "unknown")
-        # answer_correct: parsed status matches what was actually true at ask time
-        # AND the right document was retrieved
         answer_correct = (parsed == truth) and retrieval_hit
     return {"retrieval_hit": retrieval_hit, "answer_correct": answer_correct, "parsed": parsed}
 
 
-def _doc_staleness_s(name: str) -> int:
-    row = db.ledger().find_one({"doc_name": name, "synced_at": None}, sort=[("changed_at", 1)])
-    if not row:
-        return 0
-    t = row["changed_at"]
-    t = t if t.tzinfo else t.replace(tzinfo=timezone.utc)
-    return int((pipeline.utcnow() - t).total_seconds())
+# ── scenario runner ────────────────────────────────────────────────────────────
 
-
-def run_scenario(scenario: str, seed: int = 42, lag_points: list[int] | None = None) -> dict:
-    """Deterministic: fixed RNG seed, fixed query set, cached LLM answers."""
+def run_scenario(scenario: str, seed: int = 42,
+                 lag_points: list[int] | None = None) -> dict:
+    """Deterministic: fixed RNG seed, fixed query sets, cached LLM answers."""
     rng = random.Random(seed)
     lag_points = lag_points or [0, 10, 30, 60, 120]
     results = []
 
     if scenario == "control":
+        # Live mode: everything syncs on change — both lines stay near 100%.
+        # We measure the same queries at each nominal lag point; since live mode
+        # always has fresh data, results are cached and identical across points.
+        # This produces the flat "floor" line that contrasts with the degrading scenarios.
         mode_state.set_mode("live")
         pipeline.rebuild_all()
         time.sleep(1)
         truths = _snapshot_truths()
-        for q, svc in QUERY_SET:
-            r = _ask_graded(q, svc, "live", truths)
-            results.append({"lag_s": 0, **r})
+        for lag in lag_points:
+            for q, svc in QUERY_SET:
+                r = _ask_graded(q, svc, "live", truths)
+                results.append({"lag_s": lag, "nominal_lag_s": lag, **r})
 
-    else:
+    elif scenario == "mechanism_b":
+        # Factual drift: status flips, embeddings untouched.
+        # Reset all flip targets to "available" first — previous runs may have left them
+        # in "sold_out", which would make the flip a no-op and kill all divergence.
+        for name in FLIP_TARGETS:
+            db.services().update_one({"name": name}, {"$set": {"status": "available"}})
         mode_state.set_mode("baseline")
-        pipeline.rebuild_all()   # start from fully fresh state
+        pipeline.rebuild_all()
         db.ledger().delete_many({"synced_at": None})
 
-        targets = rng.sample(FLIP_TARGETS, k=3)
-        for name in targets:
-            if scenario == "mechanism_b":
-                new_status = rng.choice(["down", "degraded"])
-                db.services().update_one({"name": name}, {"$set": {"status": new_status}})
-            else:  # mechanism_a — rewrite the runbook so its meaning moves
-                db.services().update_one({"name": name}, {"$set": {"runbook_text":
-                    f"Symptoms: complete rewrite for {name} — database connection pool exhaustion, "
-                    f"failover loops, replica lag. Steps: (1) inspect pool metrics (2) fail over "
-                    f"primary (3) drain and restart workers. Edited at seed {seed}."}})
-
-        time.sleep(2)  # let the watcher record the pending rows
+        flip_schedule = rng.sample(FLIP_TARGETS, k=3)
         t0 = time.monotonic()
+        try:
+            for i, lag in enumerate(lag_points):
+                while time.monotonic() - t0 < lag:
+                    time.sleep(0.5)
 
-        for lag in lag_points:
-            while time.monotonic() - t0 < lag:
-                time.sleep(0.5)
+                # Flip one additional dish stale just before each measurement (skip lag=0)
+                if i > 0 and flip_schedule:
+                    name = flip_schedule.pop(0)
+                    db.services().update_one({"name": name}, {"$set": {"status": "sold_out"}})
+                    time.sleep(1.5)  # let watcher record the pending row
 
-            # Snapshot truths NOW — while services are still in their flipped state.
-            # This is the critical fix: do NOT read truth after rebuild() restores them.
-            truths = _snapshot_truths()
+                truths = _snapshot_truths()
+                for q, svc in QUERY_SET:
+                    r = _ask_graded(q, svc, "baseline", truths)
+                    results.append({"lag_s": lag, "nominal_lag_s": lag, **r})
+        finally:
+            for name in FLIP_TARGETS:
+                db.services().update_one({"name": name}, {"$set": {"status": "available"}})
+            pipeline.rebuild_all()
 
-            for q, svc in QUERY_SET:
-                r = _ask_graded(q, svc, "baseline", truths)
-                results.append({
-                    "lag_s": _doc_staleness_s(svc) if svc in targets else lag,
-                    "nominal_lag_s": lag,
-                    **r
-                })
+    else:  # mechanism_a
+        # Semantic drift: runbook rewrites shift the embedding.
+        # Restore original runbook texts first — previous runs leave rewrites in the DB.
+        for name, text in ORIGINAL_RUNBOOKS.items():
+            db.services().update_one({"name": name}, {"$set": {"runbook_text": text}})
+        mode_state.set_mode("baseline")
+        pipeline.rebuild_all()
+        db.ledger().delete_many({"synced_at": None})
 
-        pipeline.rebuild_all()  # restore freshness AFTER all grading is done
+        rewrite_schedule = rng.sample(list(MECH_A_REWRITES.keys()), k=3)
+        t0 = time.monotonic()
+        try:
+            for i, lag in enumerate(lag_points):
+                while time.monotonic() - t0 < lag:
+                    time.sleep(0.5)
 
-    # aggregate per lag point
+                if i > 0 and rewrite_schedule:
+                    name = rewrite_schedule.pop(0)
+                    db.services().update_one(
+                        {"name": name},
+                        {"$set": {"runbook_text": MECH_A_REWRITES[name]}}
+                    )
+                    # Rebuild to push the new text into the vector index;
+                    # this makes the embedding stale relative to old recipe queries.
+                    pipeline.rebuild_all()
+                    db.ledger().delete_many({"synced_at": None})
+                    time.sleep(0.5)
+
+                truths = _snapshot_truths()
+                for q, svc in QUERY_SET_A:
+                    r = _ask_graded(q, svc, "baseline", truths)
+                    results.append({"lag_s": lag, "nominal_lag_s": lag, **r})
+        finally:
+            for name, text in ORIGINAL_RUNBOOKS.items():
+                db.services().update_one({"name": name}, {"$set": {"runbook_text": text}})
+            pipeline.rebuild_all()
+
+    # ── aggregate per nominal lag point ───────────────────────────────────────
     by_lag: dict[int, dict] = {}
     for r in results:
-        key = r["lag_s"] if scenario == "control" else r.get("nominal_lag_s", r["lag_s"])
+        key = r.get("nominal_lag_s", r["lag_s"])
         b = by_lag.setdefault(key, {"n": 0, "retr": 0, "corr": 0})
         b["n"] += 1
         b["retr"] += int(r["retrieval_hit"])
@@ -140,7 +233,9 @@ def run_scenario(scenario: str, seed: int = 42, lag_points: list[int] | None = N
     ]
 
     out = {"scenario": scenario, "seed": seed, "curve": curve, "trials": len(results)}
-    db.get_db()[COLLECTION_BENCH].update_one({"_id": scenario}, {"$set": out}, upsert=True)
+    db.get_db()[COLLECTION_BENCH].update_one(
+        {"_id": scenario}, {"$set": out}, upsert=True
+    )
     return out
 
 
@@ -154,6 +249,7 @@ def ttf_stats() -> dict:
         return values[i]
     out = {}
     for m in ("baseline", "live"):
-        vals = [r["ttf_ms"] for r in db.ledger().find({"mode": m, "ttf_ms": {"$ne": None}})]
+        vals = [r["ttf_ms"] for r in
+                db.ledger().find({"mode": m, "ttf_ms": {"$ne": None}})]
         out[m] = {"p50_ms": pct(vals, 50), "p95_ms": pct(vals, 95), "n": len(vals)}
     return out

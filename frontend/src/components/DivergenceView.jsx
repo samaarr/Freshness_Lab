@@ -35,29 +35,40 @@ const AVAIL_OPTIONS = [
   { value: 'sold_out',  label: 'sold_out'  },
 ]
 
-/* ── animation steps for each data-path scenario ────────── */
+/* ── animation steps ─────────────────────────────────────── */
 const FLOW_STEPS = {
-  /* factual-live: 900+1000+900 = 2800ms total */
   'factual-live': [
-    { node: 'fact-card',     caption: 'status changed',                                          ms: 900  },
-    { node: 'snap-bypassed', caption: 'snapshot bypassed — live mode re-reads field directly',   ms: 1000 },
-    { node: 'fork-right',    caption: 're-read live field → answer correct',                     ms: 900  },
+    { node: 'fact-card',     caption: 'status changed',                                           ms: 900  },
+    { node: 'snap-bypassed', caption: 'snapshot bypassed — live mode re-reads field directly',    ms: 1000 },
+    { node: 'fork-right',    caption: 're-read live field → answer correct',                      ms: 900  },
   ],
-  /* factual-baseline: 900+1100 = 2000ms total */
   'factual-baseline': [
-    { node: 'fact-card',     caption: 'status changed',                                          ms: 900  },
-    { node: 'snap-stale',    caption: 'snapshot not updated — baseline queues the change',       ms: 1100 },
+    { node: 'fact-card',     caption: 'status changed',                                           ms: 900  },
+    { node: 'snap-stale',    caption: 'snapshot not updated — baseline queues the change',        ms: 1100 },
+    { node: 'fork-left',     caption: 'stale snapshot served → answer wrong',                    ms: 900  },
   ],
-  /* semantic: 900+1000 = 1900ms total */
-  'semantic': [
-    { node: 'recipe-card',   caption: 'runbook_text changed',                                    ms: 900  },
-    { node: 'vector-card',   caption: 're-embed fired → new vector in index',                    ms: 1000 },
+  'semantic-live': [
+    { node: 'recipe-card',   caption: 'runbook_text changed',                                     ms: 900  },
+    { node: 'vector-card',   caption: 're-embed fired → new vector in index',                     ms: 1000 },
+    { node: 'fork-right',    caption: 'fresh embedding, live re-read → correct',                  ms: 900  },
+  ],
+  'semantic-baseline': [
+    { node: 'recipe-card',   caption: 'runbook_text changed',                                     ms: 900  },
+    { node: 'vector-card',   caption: 're-embed queued — search_behind_s climbs until rebuild',   ms: 1100 },
+    { node: 'fork-left',     caption: 'snapshot has old description until rebuild',               ms: 900  },
+  ],
+  'sweep': [
+    { node: 'recipe-card', caption: 'auto-sweep: rebuilding all documents',    ms: 500 },
+    { node: 'vector-card', caption: 're-embedding all descriptions',            ms: 600 },
+    { node: 'fact-card',   caption: 'snapshots refreshed — staleness healed',  ms: 700 },
   ],
   'switch-live': [
     { node: 'snap-bypassed', caption: 'live mode — agent bypasses snapshot, re-reads live field', ms: 1000 },
+    { node: 'fork-right',    caption: 'live path now active',                                     ms: 800  },
   ],
   'switch-baseline': [
-    { node: 'snap-stale',    caption: 'baseline mode — snapshot served as-is until rebuild',     ms: 1000 },
+    { node: 'snap-stale',    caption: 'baseline mode — snapshot served as-is until rebuild',      ms: 1000 },
+    { node: 'fork-left',     caption: 'snapshot path now active',                                 ms: 800  },
   ],
 }
 
@@ -90,7 +101,18 @@ const STATUS_MAP = {
   sold_out:  { bg: 'var(--red-bg)',   fg: 'var(--red-text)'   },
 }
 
-/* one card anatomy — 1px hairline everywhere */
+const StatusPill = ({ status }) => {
+  const ss = STATUS_MAP[status] || { bg: 'var(--bg-page)', fg: 'var(--text-3)' }
+  return (
+    <span className="mono status-transition" style={{
+      fontSize: 'var(--fs-11h)', fontWeight: 500,
+      padding: '1px 7px', borderRadius: 'var(--radius-sm)',
+      background: ss.bg, color: ss.fg, flexShrink: 0,
+    }}>{status || '—'}</span>
+  )
+}
+
+/* one card anatomy */
 const card = {
   background:   'var(--bg-card)',
   border:       '1px solid var(--border)',
@@ -99,34 +121,43 @@ const card = {
 }
 const cardTitle = { fontWeight: 600, fontSize: 'var(--fs-15)' }
 const cardBody  = { fontSize: 'var(--fs-13h)', color: 'var(--text-2)', lineHeight: 1.5 }
-const techCap   = { fontFamily: 'var(--font-ui)', fontSize: 'var(--fs-11h)', color: 'var(--text-3)', marginTop: 'var(--s-4)', lineHeight: 1.5 }
 const whisper   = { fontSize: 'var(--fs-12)', color: 'var(--text-3)', fontStyle: 'italic', marginTop: 'var(--s-2)' }
 
 /* ── main component ──────────────────────────────────────── */
-export default function DivergenceView({ services, mode, extraSeconds, onChanged }) {
+export default function DivergenceView({
+  services, mode, extraSeconds, onChanged, sweepTick,
+  sweepOn, onSweepToggle, sweepCountdown, lastRebuildAgo,
+}) {
   const dish = services.find((s) => s.name === DISH) || services[0] || {}
   const [thread, setThread]   = useState([])
   const [busy, setBusy]       = useState(false)
   const [inspect, setInspect] = useState(null)
   const [q, setQ]             = useState('')
 
-  /* animation state: which pipeline node is currently lit */
   const [flow, setFlow]       = useState({ node: null, caption: '' })
   const flowTimers            = useRef([])
 
   const rawBehind = dish.facts_behind_s
-  const behind    = rawBehind == null ? null : rawBehind + (extraSeconds || 0)
-  const stale     = behind != null && behind > 0
+  const stale     = rawBehind != null && rawBehind > 0
+  const behind    = stale ? rawBehind + (extraSeconds || 0) : null
   const live      = mode === 'live'
+
+  const rawSearch    = dish.search_behind_s
+  const vectorStale  = rawSearch != null && rawSearch > 0
+  const searchBehind = vectorStale ? rawSearch + (extraSeconds || 0) : null
+
+  const embeddedAgoS = dish.embedded_at
+    ? Math.floor((Date.now() - new Date(dish.embedded_at).getTime()) / 1000)
+    : null
 
   /* latest answered question */
   const last     = [...thread].reverse().find((m) => m.role === 'agent' && m.provenance)
   const prov     = last?.provenance
   const provText = last?.text
 
-  /* fork state: based on latest prov */
-  const hasProv      = !!prov
-  const forkDiverged = hasProv && prov.context_status !== prov.truth_status
+  const hasProv        = !!prov
+  const forkDiverged   = hasProv && prov.context_status !== prov.truth_status
+  const versionDiverged = hasProv && prov.embedding_version_used !== dish.embedding_version
 
   /* ── animation runner ───────────────────────────────────── */
   const runFlow = useCallback((steps) => {
@@ -144,8 +175,11 @@ export default function DivergenceView({ services, mode, extraSeconds, onChanged
 
   useEffect(() => () => flowTimers.current.forEach(clearTimeout), [])
 
-  /* ── Task 1: mode-boundary divider + Task 2: mode animation ─
-     skip the initial mount — only react to real mode changes   */
+  useEffect(() => {
+    if (!sweepTick) return
+    runFlow(FLOW_STEPS['sweep'])
+  }, [sweepTick, runFlow])
+
   const mountedRef = useRef(false)
   useEffect(() => {
     if (!mountedRef.current) { mountedRef.current = true; return }
@@ -153,7 +187,7 @@ export default function DivergenceView({ services, mode, extraSeconds, onChanged
     runFlow(mode === 'live' ? FLOW_STEPS['switch-live'] : FLOW_STEPS['switch-baseline'])
   }, [mode, runFlow])
 
-  /* ── node ring helper (subtle 2px ring + outer glow) ────── */
+  /* ── node ring helper ────────────────────────────────────── */
   const ring = (node, color = 'green') => {
     if (flow.node !== node) return { boxShadow: 'none', transition: 'box-shadow 300ms var(--ease)' }
     const stroke = { green: '#1d9e75', red: '#e24b4a', grey: 'rgba(0,0,0,0.25)' }[color]
@@ -161,7 +195,6 @@ export default function DivergenceView({ services, mode, extraSeconds, onChanged
     return { boxShadow: `0 0 0 2px ${stroke}, 0 0 14px ${glow}`, transition: 'box-shadow 150ms var(--ease)' }
   }
 
-  /* snapshot card: stale = red ring; bypassed = grey ring + dim */
   const snapFlowStyle =
     flow.node === 'snap-stale'
       ? ring('snap-stale', 'red')
@@ -178,7 +211,7 @@ export default function DivergenceView({ services, mode, extraSeconds, onChanged
 
   const setRecipe = async (text) => {
     if (!text) return
-    runFlow(FLOW_STEPS['semantic'])
+    runFlow(live ? FLOW_STEPS['semantic-live'] : FLOW_STEPS['semantic-baseline'])
     await api.patchService(DISH, { runbook_text: text })
     onChanged()
   }
@@ -201,14 +234,13 @@ export default function DivergenceView({ services, mode, extraSeconds, onChanged
     setQ('')
   }
 
-  /* ── Task 1: find the last divider — messages before it recede ─ */
   const lastDivIdx = thread.reduce((acc, m, i) => m.role === 'divider' ? i : acc, -1)
 
   /* ── render ────────────────────────────────────────────── */
   return (
     <div style={{ maxWidth: 1200, margin: '0 auto', padding: '0 var(--s-5) var(--s-7)' }}>
 
-      {/* ── intro sentence ───────────────────────────────── */}
+      {/* ── intro ────────────────────────────────────────── */}
       <p style={{
         marginTop: 'var(--s-4)', marginBottom: 0,
         fontSize: 'var(--fs-13h)', color: 'var(--text-2)', lineHeight: 1.65, maxWidth: 700,
@@ -224,64 +256,66 @@ export default function DivergenceView({ services, mode, extraSeconds, onChanged
 
       <div className="two-col">
 
-        {/* stored fact — lights up on factual change */}
         <div style={{ ...card, ...ring('fact-card') }}>
           <div style={cardTitle}>Change a stored fact</div>
           <div style={whisper}>(the dish sells out)</div>
           <div style={{ marginTop: 'var(--s-4)' }}>
-            <SegmentedControl
-              options={AVAIL_OPTIONS}
-              value={dish.status || 'available'}
-              onChange={setAvailability}
-              mono
-            />
+            <SegmentedControl options={AVAIL_OPTIONS} value={dish.status || 'available'} onChange={setAvailability} mono />
           </div>
-          <div style={techCap}>
+          <div style={{ fontFamily: 'var(--font-ui)', fontSize: 'var(--fs-11h)', color: 'var(--text-3)', marginTop: 'var(--s-4)' }}>
             <Id>status</Id> field · mechanism B · snapshot refreshes, no re-embed
           </div>
         </div>
 
-        {/* semantic text — lights up on recipe change */}
         <div style={{ ...card, ...ring('recipe-card') }}>
           <div style={cardTitle}>Change the semantic text</div>
           <div style={whisper}>(the chef rewrites the description)</div>
           <div style={{ marginTop: 'var(--s-4)' }}>
-            <Listbox
-              options={RECIPE_OPTIONS}
-              placeholder="choose a recipe rewrite…"
-              onSelect={setRecipe}
-            />
+            <Listbox options={RECIPE_OPTIONS} placeholder="choose a recipe rewrite…" onSelect={setRecipe} />
           </div>
-          <div style={techCap}>
+          <div style={{ fontFamily: 'var(--font-ui)', fontSize: 'var(--fs-11h)', color: 'var(--text-3)', marginTop: 'var(--s-4)' }}>
             <Id>runbook_text</Id> field · mechanism A · re-embed → new vector
           </div>
         </div>
 
       </div>
 
-      {/* TwoHairlines doubles as animation caption display */}
       <TwoHairlines caption={flow.caption} />
 
       {/* ════════════════════════════════════════════════════
           2 · TWO THINGS SHOULD UPDATE — ONLY ONE DID
       ════════════════════════════════════════════════════ */}
-      <Eyebrow n="2" label="Two things should update — only one did" />
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        gap: 'var(--s-4)', flexWrap: 'wrap',
+        marginTop: 'var(--s-5)', marginBottom: 'var(--s-4)',
+      }}>
+        <Eyebrow n="2" label="Two things should update — only one did" inline />
+        {mode === 'baseline' && (
+          <BaselineSweepButton
+            sweepOn={sweepOn}
+            onToggle={onSweepToggle}
+            sweepCountdown={sweepCountdown}
+            lastRebuildAgo={lastRebuildAgo}
+          />
+        )}
+      </div>
 
       <div className="two-col">
 
-        {/* served value: snapshot_text — lights up red (stale) or dim (bypassed) */}
+        {/* ── LEFT: Served value (Mechanism B) ─────────── */}
         <div style={{
           ...card,
           borderColor: (stale && !live) ? 'var(--red-border-strong)' : 'var(--border)',
           transition: 'border-color var(--duration-heal) var(--ease)',
           ...snapFlowStyle,
         }}>
+          {/* header */}
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 'var(--s-4)' }}>
             <div>
               <div style={cardTitle}>Served value</div>
               <div className="mono" style={{ fontSize: 'var(--fs-11h)', color: 'var(--text-3)', marginTop: 2 }}>snapshot_text</div>
             </div>
-
             {stale ? (
               <div className="status-transition" style={{
                 flexShrink: 0, textAlign: 'center',
@@ -295,17 +329,13 @@ export default function DivergenceView({ services, mode, extraSeconds, onChanged
                     strokeWidth="1.75" strokeLinecap="round">
                     <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/>
                   </svg>
-                  <span className="mono" style={{
-                    fontSize: 'var(--fs-20)', fontWeight: 600, lineHeight: 1,
-                    color: live ? 'var(--text-3)' : 'var(--red)',
-                  }}>
+                  <span className="mono" style={{ fontSize: 'var(--fs-20)', fontWeight: 600, lineHeight: 1,
+                    color: live ? 'var(--text-3)' : 'var(--red)' }}>
                     {fmtBehind(behind)}
                   </span>
                 </div>
                 <div style={{ fontSize: 10, marginTop: 2, letterSpacing: '0.03em',
-                  color: live ? 'var(--text-3)' : 'var(--red-text)' }}>
-                  stale
-                </div>
+                  color: live ? 'var(--text-3)' : 'var(--red-text)' }}>stale</div>
               </div>
             ) : (
               <div className="status-transition" style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0, marginTop: 2 }}>
@@ -315,18 +345,88 @@ export default function DivergenceView({ services, mode, extraSeconds, onChanged
             )}
           </div>
 
-          <div style={{ ...cardBody, marginTop: 'var(--s-4)' }}>
-            {stale && live
-              ? <>Snapshot is {fmtBehind(behind)} old and still stale — but in live mode the agent re-reads the <Id>status</Id> field directly, bypassing it.</>
-              : stale
-                ? `Snapshot is ${fmtBehind(behind)} old. This is the embed-time value a naive pipeline hands the model.`
-                : 'What a naive pipeline hands the model.'}
+          {/* retrieval spine — one compact mono line */}
+          <div style={{ marginTop: 'var(--s-4)' }}>
+            {hasProv ? (
+              <div className="mono" style={{ fontSize: 'var(--fs-11h)', color: 'var(--text-3)', lineHeight: 1.55 }}>
+                $vectorSearch → found {prov.retrieved_doc} · {prov.similarity_score} · embedding v{prov.embedding_version_used}
+                <span style={{ color: 'var(--border-strong)' }}> · </span>
+                retrieval healthy — found either way; only the read differs.
+              </div>
+            ) : (
+              <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)', fontStyle: 'italic' }}>
+                {stale && !live
+                  ? <>Snapshot {fmtBehind(behind)} old — a fact changed and baseline hasn't rebuilt.</>
+                  : 'What a naive pipeline hands the model.'}
+              </div>
+            )}
           </div>
-          <div style={whisper}>(the waiter's pre-written note card)</div>
+
+          {/* before/after READ — two compact rows */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 'var(--s-3)' }}>
+            {hasProv ? (
+              <>
+                {/* stale row — snapshot path */}
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px',
+                  background: forkDiverged ? 'rgba(226,75,74,0.05)' : 'rgba(29,158,117,0.04)',
+                  border: `1px solid ${forkDiverged ? 'var(--red-border)' : 'var(--green-border)'}`,
+                  borderRadius: 'var(--radius-sm)',
+                  ...ring('fork-left', 'red'),
+                }}>
+                  <span className="mono" style={{ fontSize: 'var(--fs-11h)', color: 'var(--text-3)', flexShrink: 0, whiteSpace: 'nowrap' }}>
+                    read snapshot_text
+                  </span>
+                  <ChevronRight size={10} strokeWidth={1.75} style={{ color: 'var(--text-3)', flexShrink: 0 }} />
+                  <StatusPill status={prov.context_status} />
+                  <span className="mono" style={{ fontSize: 'var(--fs-11h)', color: 'var(--text-3)', flex: 1 }}>
+                    {prov.snapshot_age_s != null ? `snapshot ${fmtBehind(prov.snapshot_age_s)} old` : ''}
+                  </span>
+                  <span className="mono" style={{ fontSize: 'var(--fs-11h)', fontWeight: 600, flexShrink: 0,
+                    color: forkDiverged ? 'var(--red-text)' : 'var(--green-text)' }}>
+                    {forkDiverged ? '✗  WRONG · stale value served' : '✓  CORRECT · snapshot current'}
+                  </span>
+                </div>
+
+                {/* fresh row — live re-read path */}
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px',
+                  background: 'rgba(29,158,117,0.06)',
+                  border: '1px solid var(--green-border)',
+                  borderRadius: 'var(--radius-sm)',
+                  ...ring('fork-right', 'green'),
+                }}>
+                  <span className="mono" style={{ fontSize: 'var(--fs-11h)', color: 'var(--text-3)', flexShrink: 0, whiteSpace: 'nowrap' }}>
+                    re-read live field
+                  </span>
+                  <ChevronRight size={10} strokeWidth={1.75} style={{ color: 'var(--text-3)', flexShrink: 0 }} />
+                  <StatusPill status={prov.truth_status} />
+                  <span className="mono" style={{ fontSize: 'var(--fs-11h)', color: 'var(--text-3)', flex: 1 }}>
+                    {prov.ttf_ms != null ? `synced in ${prov.ttf_ms} ms` : 'read at query time'}
+                  </span>
+                  <span className="mono" style={{ fontSize: 'var(--fs-11h)', fontWeight: 600, color: 'var(--green-text)', flexShrink: 0 }}>
+                    ✓  CORRECT · payload fresh
+                  </span>
+                </div>
+              </>
+            ) : (
+              <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)', fontStyle: 'italic', padding: '4px 0' }}>
+                change a fact above, then ask in section 3 — the read story fills in here
+              </div>
+            )}
+          </div>
+
+          <div style={{ ...whisper, marginTop: 'var(--s-3)' }}>(the waiter's pre-written note card)</div>
         </div>
 
-        {/* vector index: embedding — lights up green on semantic change */}
-        <div style={{ ...card, ...ring('vector-card') }}>
+        {/* ── RIGHT: Vector index (Mechanism A) ────────── */}
+        <div style={{
+          ...card,
+          borderColor: vectorStale ? 'var(--red-border-strong)' : 'var(--border)',
+          transition: 'border-color var(--duration-heal) var(--ease)',
+          ...ring('vector-card'),
+        }}>
+          {/* header */}
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 'var(--s-4)' }}>
             <div>
               <div style={cardTitle}>Vector index</div>
@@ -334,24 +434,103 @@ export default function DivergenceView({ services, mode, extraSeconds, onChanged
                 embedding → Atlas Vector Search
               </div>
             </div>
-            <span className="mono status-transition" style={{
-              display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0,
-              background: 'var(--green-bg)', color: 'var(--green-text)',
-              border: '1px solid var(--green-border)',
-              borderRadius: 'var(--radius-sm)', padding: '4px 9px',
-              fontSize: 'var(--fs-11h)',
-            }}>
-              <Check size={10} strokeWidth={2.5} />
-              {prov ? `found ${prov.retrieved_doc} · ${prov.similarity_score}` : 'healthy'}
-            </span>
+            {vectorStale ? (
+              <div className="status-transition" style={{
+                flexShrink: 0, textAlign: 'center',
+                background: 'var(--red-bg)', border: '1px solid var(--red-border)',
+                borderRadius: 'var(--radius)', padding: '6px 10px',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5, justifyContent: 'center' }}>
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+                    stroke="var(--red)" strokeWidth="1.75" strokeLinecap="round">
+                    <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/>
+                  </svg>
+                  <span className="mono" style={{ fontSize: 'var(--fs-20)', fontWeight: 600, lineHeight: 1, color: 'var(--red)' }}>
+                    {fmtBehind(searchBehind)}
+                  </span>
+                </div>
+                <div style={{ fontSize: 10, marginTop: 2, letterSpacing: '0.03em', color: 'var(--red-text)' }}>stale</div>
+              </div>
+            ) : (
+              <div className="status-transition" style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0, marginTop: 2 }}>
+                <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--green)' }} />
+                <span style={{ fontSize: 'var(--fs-11h)', color: 'var(--text-3)' }}>in sync</span>
+              </div>
+            )}
           </div>
-          <div style={{ ...cardBody, marginTop: 'var(--s-4)' }}>
-            A status flip barely moves the vector, so <Id>$vectorSearch</Id> still finds the right document.
+
+          {/* live metrics */}
+          <div style={{ marginTop: 'var(--s-4)', display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <div className="mono" style={{ fontSize: 'var(--fs-11h)', color: 'var(--text-2)' }}>
+              v{dish.embedding_version ?? '—'}
+              {embeddedAgoS != null && <span style={{ color: 'var(--text-3)' }}> · re-embedded {fmtBehind(embeddedAgoS)} ago</span>}
+              {dish.embed_ms != null && <span style={{ color: 'var(--text-3)' }}> · last recompute {dish.embed_ms} ms</span>}
+            </div>
+            <div className="mono" style={{
+              fontSize: 'var(--fs-11h)', fontWeight: 600,
+              color: dish.content_fresh === false ? 'var(--red-text)' : 'var(--green-text)',
+            }}>
+              {dish.content_fresh === false
+                ? 'vector stale vs description ✗'
+                : dish.content_fresh === true
+                  ? 'vector matches current description ✓'
+                  : '—'}
+            </div>
+          </div>
+
+          {/* before/after EMBEDDING — two compact rows */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 'var(--s-3)' }}>
+            {hasProv ? (
+              <>
+                {/* stale row — embedding used at query time */}
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px',
+                  background: versionDiverged ? 'rgba(226,75,74,0.05)' : 'rgba(29,158,117,0.04)',
+                  border: `1px solid ${versionDiverged ? 'var(--red-border)' : 'var(--green-border)'}`,
+                  borderRadius: 'var(--radius-sm)',
+                }}>
+                  <span className="mono" style={{ fontSize: 'var(--fs-11h)', color: 'var(--text-3)', flexShrink: 0, whiteSpace: 'nowrap' }}>
+                    embedding v{prov.embedding_version_used}
+                  </span>
+                  <span className="mono" style={{ fontSize: 'var(--fs-11h)', color: 'var(--text-3)', flex: 1 }}>
+                    {prov.similarity_score} · vector encodes the {versionDiverged ? 'old' : 'current'} description
+                  </span>
+                  <span className="mono" style={{ fontSize: 'var(--fs-11h)', fontWeight: 600, flexShrink: 0,
+                    color: versionDiverged ? 'var(--red-text)' : 'var(--green-text)' }}>
+                    {versionDiverged ? '✗  stale embedding' : '✓  current'}
+                  </span>
+                </div>
+
+                {/* fresh row — current embedding state */}
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px',
+                  background: dish.content_fresh ? 'rgba(29,158,117,0.06)' : 'rgba(226,75,74,0.03)',
+                  border: `1px solid ${dish.content_fresh ? 'var(--green-border)' : 'var(--red-border)'}`,
+                  borderRadius: 'var(--radius-sm)',
+                }}>
+                  <span className="mono" style={{ fontSize: 'var(--fs-11h)', color: 'var(--text-3)', flexShrink: 0, whiteSpace: 'nowrap' }}>
+                    re-embedded v{dish.embedding_version}
+                  </span>
+                  <span className="mono" style={{ fontSize: 'var(--fs-11h)', color: 'var(--text-3)', flex: 1 }}>
+                    {dish.embed_ms != null ? `recompute ${dish.embed_ms} ms · ` : ''}vector matches current description
+                  </span>
+                  <span className="mono" style={{ fontSize: 'var(--fs-11h)', fontWeight: 600, flexShrink: 0,
+                    color: dish.content_fresh ? 'var(--green-text)' : 'var(--red-text)' }}>
+                    {dish.content_fresh ? '✓' : '✗  pending re-embed'}
+                  </span>
+                </div>
+              </>
+            ) : (
+              <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)', fontStyle: 'italic', padding: '4px 0' }}>
+                change the description above, then ask in section 3 — fills in here
+              </div>
+            )}
+          </div>
+
+          <div style={{ ...cardBody, marginTop: 'var(--s-3)' }}>
+            When the description (<Id>runbook_text</Id>) changes, the vector must be recomputed — until it does, search points at the old meaning.
           </div>
           <div style={whisper}>(the waiter still recognises which dish you mean)</div>
-          <div style={techCap}>
-            index on the <Id>embedding</Id> field · identical in both modes
-          </div>
         </div>
 
       </div>
@@ -359,102 +538,9 @@ export default function DivergenceView({ services, mode, extraSeconds, onChanged
       <SingleHairline />
 
       {/* ════════════════════════════════════════════════════
-          3 · THE DIVERGENCE — the proof in one frame
+          3 · TRY IT
       ════════════════════════════════════════════════════ */}
-      <Eyebrow n="3" label="The divergence" />
-
-      <div style={card}>
-
-        <div style={{ fontWeight: 600, fontSize: 'var(--fs-20)', marginBottom: 'var(--s-4)' }}>
-          Same question · same retrieval
-        </div>
-
-        {/* shared retrieval bar */}
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 'var(--s-3)',
-          padding: '9px var(--s-4)',
-          background: 'var(--green-bg)',
-          border: '1px solid var(--green-border)',
-          borderRadius: 'var(--radius)',
-          marginBottom: 'var(--s-5)',
-        }}>
-          <span className="mono" style={{ fontSize: 'var(--fs-11h)', color: 'var(--text-3)' }}>
-            $vectorSearch
-          </span>
-          <ChevronRight size={11} strokeWidth={1.75} style={{ color: 'var(--text-3)', flexShrink: 0 }} />
-          <span className="mono" style={{ fontSize: 'var(--fs-13h)', fontWeight: 500, color: 'var(--green-text)', flex: 1 }}>
-            {hasProv
-              ? `found ${prov.retrieved_doc} · ${prov.similarity_score}`
-              : 'finds the right document by meaning — ask below to see'}
-          </span>
-          <span style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
-            <Check size={11} strokeWidth={2.5} style={{ color: 'var(--green-text)' }} />
-            <span style={{ fontSize: 'var(--fs-11h)', color: 'var(--green-text)', fontWeight: 500 }}>
-              retrieval healthy
-            </span>
-          </span>
-        </div>
-
-        {/* fork columns */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--s-4)' }}>
-
-          <ForkColumn
-            heading="Read the stored snapshot"
-            tech="snapshot_text · embed-time value"
-            status={hasProv ? prov.context_status : null}
-            ok={hasProv ? !forkDiverged : null}
-            verdictLine={hasProv
-              ? (forkDiverged
-                  ? `✗  WRONG · snapshot ${fmtBehind(prov.snapshot_age_s)} stale`
-                  : '✓  CORRECT · snapshot current')
-              : null}
-            body={hasProv
-              ? (!prov.live_read
-                  ? provText
-                  : 'Agent re-reads the live field in this mode — snapshot not used.')
-              : null}
-            bodyMono={hasProv && prov.live_read}
-          />
-
-          {/* RIGHT fork — lights up on fork-right animation step */}
-          <ForkColumn
-            heading="Re-read the live field"
-            tech="status · current field value"
-            status={hasProv ? prov.truth_status : null}
-            ok={hasProv ? true : null}
-            verdictLine={hasProv ? '✓  CORRECT · payload fresh' : null}
-            body={hasProv ? `status: ${prov.truth_status}` : null}
-            bodyMono
-            isRight
-            isLit={flow.node === 'fork-right'}
-          />
-
-        </div>
-
-        {/* punchline */}
-        <div style={{
-          marginTop: 'var(--s-5)', paddingTop: 'var(--s-4)',
-          borderTop: '1px solid var(--border)',
-          fontWeight: 600, fontSize: 'var(--fs-15)',
-          color: forkDiverged ? 'var(--red-text)' : hasProv ? 'var(--green-text)' : 'var(--text-3)',
-          transition: 'color var(--duration-heal) var(--ease)',
-          lineHeight: 1.5,
-        }}>
-          {hasProv
-            ? (forkDiverged
-                ? "Retrieval is identical and green on both sides. Only the read path differs — the model didn't hallucinate, it was handed stale data."
-                : 'Both paths agree — the answer is correct. Change the status and ask in baseline to see the fork diverge.')
-            : 'Ask a question below — the fork fills in live from the response provenance.'}
-        </div>
-
-      </div>
-
-      <SingleHairline />
-
-      {/* ════════════════════════════════════════════════════
-          4 · TRY IT
-      ════════════════════════════════════════════════════ */}
-      <Eyebrow n="4" label="Try it" />
+      <Eyebrow n="3" label="Try it" />
 
       <div style={{
         background: 'var(--bg-page)',
@@ -468,21 +554,20 @@ export default function DivergenceView({ services, mode, extraSeconds, onChanged
           <div>
             <div style={{ fontWeight: 600, fontSize: 'var(--fs-15)' }}>RAG agent</div>
             <div style={{ fontSize: 'var(--fs-11h)', color: 'var(--text-3)' }}>
-              <span className="mono">{mode}</span> mode · the fork in section 3 updates after each answer
+              <span className="mono">{mode}</span> mode · answers update the section 2 cards above
             </div>
           </div>
         </div>
 
-        {/* thread — dividers + receded prior-mode messages */}
+        {/* thread */}
         <div style={{ padding: 'var(--s-4) var(--card-pad)', display: 'flex', flexDirection: 'column', gap: 'var(--s-4)', minHeight: 80 }}>
           {thread.length === 0 && (
             <div style={{ color: 'var(--text-3)', fontSize: 'var(--fs-13h)' }}>
-              Ask a question — then watch section 3 populate.
+              Ask a question — then watch the section 2 cards populate.
             </div>
           )}
 
           {thread.map((m, i) => {
-            /* Task 1: messages before the last mode-divider recede to 45% */
             const receded = lastDivIdx >= 0 && i < lastDivIdx
             const fade    = { opacity: receded ? 0.45 : 1, transition: 'opacity var(--duration-heal) var(--ease)', filter: receded ? 'saturate(0.4)' : 'none' }
 
@@ -510,7 +595,6 @@ export default function DivergenceView({ services, mode, extraSeconds, onChanged
               )
             }
 
-            /* agent message */
             return (
               <div key={i} style={{ ...fade, display: 'flex', gap: 'var(--s-3)', alignItems: 'flex-start', alignSelf: 'flex-start', maxWidth: '80%' }}>
                 <div style={{
@@ -626,76 +710,6 @@ export default function DivergenceView({ services, mode, extraSeconds, onChanged
   )
 }
 
-/* ── ForkColumn ──────────────────────────────────────────── */
-function ForkColumn({ heading, tech, status, ok, verdictLine, body, bodyMono, isRight, isLit }) {
-  const empty   = ok === null
-  const correct = ok === true
-  const wrong   = ok === false
-
-  const ss = STATUS_MAP[status] || { bg: 'var(--bg-page)', fg: 'var(--text-3)' }
-
-  const bg = empty
-    ? 'var(--bg-page)'
-    : correct ? 'rgba(29,158,117,0.06)' : 'rgba(226,75,74,0.05)'
-  const border = empty
-    ? 'var(--border)'
-    : correct ? 'rgba(29,158,117,0.22)' : 'rgba(226,75,74,0.22)'  /* tinted, intentional — no token needed */
-
-  const litStyle = isLit
-    ? { boxShadow: '0 0 0 2px #1d9e75, 0 0 14px rgba(29,158,117,0.10)', transition: 'box-shadow 150ms var(--ease)' }
-    : { boxShadow: 'none', transition: 'box-shadow 300ms var(--ease)' }
-
-  return (
-    <div className="status-transition" style={{
-      background: bg,
-      border: `1px solid ${border}`,
-      borderRadius: 'var(--radius)',
-      padding: 'var(--s-4)',
-      display: 'flex', flexDirection: 'column', gap: 'var(--s-3)',
-      ...litStyle,
-    }}>
-      <div style={{ fontWeight: 600, fontSize: 'var(--fs-13h)', color: empty ? 'var(--text-3)' : 'var(--text-1)' }}>
-        {heading}
-      </div>
-      <div className="mono" style={{ fontSize: 'var(--fs-11h)', color: 'var(--text-3)' }}>{tech}</div>
-
-      {status ? (
-        <span className="mono status-transition" style={{
-          display: 'inline-flex', alignSelf: 'flex-start',
-          fontSize: 'var(--fs-13h)', fontWeight: 500,
-          padding: '3px 10px', borderRadius: 'var(--radius-sm)',
-          background: ss.bg, color: ss.fg,
-        }}>{status}</span>
-      ) : (
-        <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)', fontStyle: 'italic' }}>
-          {isRight ? 'current field value' : 'snapshot value'}
-        </span>
-      )}
-
-      {verdictLine ? (
-        <div className="mono" style={{
-          fontSize: 'var(--fs-11h)', fontWeight: 600,
-          color: wrong ? 'var(--red-text)' : 'var(--green-text)',
-        }}>{verdictLine}</div>
-      ) : (
-        <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-3)', fontStyle: 'italic' }}>
-          ask below — this fills in live
-        </div>
-      )}
-
-      {body && (
-        <div style={{
-          borderTop: '1px solid rgba(0,0,0,0.06)',
-          paddingTop: 'var(--s-2)',
-          fontSize: bodyMono ? 'var(--fs-11h)' : 'var(--fs-13)',
-          fontFamily: bodyMono ? 'var(--font-mono)' : 'var(--font-ui)',
-          color: 'var(--text-2)', lineHeight: 1.5,
-        }}>{body}</div>
-      )}
-    </div>
-  )
-}
-
 /* ── Inspector drawer ────────────────────────────────────── */
 function Drawer({ p, onClose }) {
   const wrong   = p.context_status && p.truth_status && p.context_status !== p.truth_status
@@ -725,7 +739,6 @@ function Drawer({ p, onClose }) {
         </div>
 
         <div style={{ padding: 'var(--card-pad)', flex: 1 }}>
-
           <div style={{
             display: 'flex', gap: 'var(--s-4)', padding: '10px var(--s-4)',
             borderRadius: 'var(--radius)',
@@ -799,23 +812,106 @@ function Drawer({ p, onClose }) {
 }
 
 /* ── layout helpers ──────────────────────────────────────── */
-function Eyebrow({ n, label, top }) {
+const fmtSweepCountdown = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+
+function BaselineSweepButton({ sweepOn, onToggle, sweepCountdown, lastRebuildAgo }) {
+  const [tip, setTip] = useState(false)
+
+  return (
+    <div
+      style={{ position: 'relative', display: 'inline-flex' }}
+      onMouseEnter={() => setTip(true)}
+      onMouseLeave={() => setTip(false)}
+    >
+      <button
+        type="button"
+        className="btn-ghost"
+        onClick={onToggle}
+        aria-pressed={sweepOn}
+        aria-describedby="sweep-tip"
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          border: `1px solid ${sweepOn ? 'rgba(186,117,23,0.35)' : 'var(--border)'}`,
+          background: sweepOn ? 'var(--amber-bg)' : 'var(--bg-card)',
+          borderRadius: 'var(--radius)',
+          padding: '3px 10px',
+          fontSize: 'var(--fs-12)',
+          color: 'var(--text-2)',
+          whiteSpace: 'nowrap',
+          lineHeight: 1.4,
+          transition: 'background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease)',
+        }}
+      >
+        <span style={{
+          width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
+          background: sweepOn ? 'var(--amber)' : 'var(--border-strong)',
+          transition: 'background var(--duration-fast) var(--ease)',
+        }} />
+        <span style={{ fontWeight: 500, color: 'var(--text-1)' }}>
+          {sweepOn ? 'Auto-sweep on' : 'Auto-sweep'}
+        </span>
+        <span className="mono" style={{ color: 'var(--text-3)' }}>60s</span>
+        {sweepOn && (
+          <span className="mono" style={{ color: 'var(--amber-text)' }}>
+            · {fmtSweepCountdown(sweepCountdown)}
+          </span>
+        )}
+        {lastRebuildAgo && (
+          <span style={{ color: 'var(--text-3)' }}>
+            · last <span className="mono">{lastRebuildAgo}</span>
+          </span>
+        )}
+      </button>
+
+      {tip && (
+        <div
+          id="sweep-tip"
+          role="tooltip"
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 6px)',
+            right: 0,
+            zIndex: 20,
+            width: 280,
+            padding: '10px 12px',
+            background: 'var(--bg-card)',
+            border: '1px solid var(--border-strong)',
+            borderRadius: 'var(--radius)',
+            boxShadow: '0 4px 16px rgba(0,0,0,0.08)',
+            fontSize: 'var(--fs-12)',
+            color: 'var(--text-2)',
+            lineHeight: 1.55,
+            pointerEvents: 'none',
+          }}
+        >
+          <div style={{ fontWeight: 600, color: 'var(--text-1)', marginBottom: 4 }}>
+            Baseline · periodic full rebuild
+          </div>
+          Re-embeds and re-snapshots every document. Data stays stale until the next sweep.
+          <div style={{ marginTop: 6, color: 'var(--text-3)' }}>
+            Click to toggle. Demo interval is 60s — real batch jobs usually run hourly or nightly.
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function Eyebrow({ n, label, top, inline }) {
   return (
     <div style={{
-      fontSize: 'var(--fs-11h)',
-      fontWeight: 600,
-      letterSpacing: '0.1em',
-      textTransform: 'uppercase',
-      color: 'var(--text-2)',
-      marginBottom: 'var(--s-4)',
-      marginTop: top ? 'var(--s-4)' : 'var(--s-5)',
+      fontSize: 'var(--fs-11h)', fontWeight: 600, letterSpacing: '0.1em',
+      textTransform: 'uppercase', color: 'var(--text-2)',
+      marginBottom: inline ? 0 : 'var(--s-4)',
+      marginTop: inline ? 0 : (top ? 'var(--s-4)' : 'var(--s-5)'),
     }}>
       {n} · {label}
     </div>
   )
 }
 
-/* TwoHairlines doubles as animation caption display */
 function TwoHairlines({ caption }) {
   return (
     <div className="two-hairlines" style={{ position: 'relative', alignItems: 'center' }}>
@@ -826,21 +922,8 @@ function TwoHairlines({ caption }) {
         <div style={{ width: 1, height: 14, background: 'var(--border-strong)' }} />
       </div>
       {caption && (
-        <div style={{
-          position: 'absolute', left: 0, right: 0, top: '50%',
-          transform: 'translateY(-50%)',
-          textAlign: 'center',
-          zIndex: 1,
-          pointerEvents: 'none',
-        }}>
-          <span className="mono" style={{
-            display: 'inline-block',
-            background: 'var(--bg-page)',
-            padding: '2px var(--s-3)',
-            fontSize: 'var(--fs-11h)',
-            color: 'var(--text-2)',
-            whiteSpace: 'nowrap',
-          }}>{caption}</span>
+        <div style={{ position: 'absolute', left: 0, right: 0, top: '50%', transform: 'translateY(-50%)', textAlign: 'center', zIndex: 1, pointerEvents: 'none' }}>
+          <span className="mono" style={{ display: 'inline-block', background: 'var(--bg-page)', padding: '2px var(--s-3)', fontSize: 'var(--fs-11h)', color: 'var(--text-2)', whiteSpace: 'nowrap' }}>{caption}</span>
         </div>
       )}
     </div>
