@@ -1,6 +1,14 @@
 # freshness-lab
 
-**Vector retrieval can stay green while the answer your RAG system serves is already wrong.**
+**Retrieval metrics stay green while answer correctness collapses.**
+
+## What this is (and isn't)
+
+This problem is **well documented** — this project does not claim to have discovered it. MongoDB's [Automated Embedding announcement](https://www.mongodb.com/company/blog/product-release-announcements/ai-search-for-agents-announcing-automated-embedding-atlas) describes the failure verbatim; SPFresh (SOSP '23) and VBASE (OSDI '23) formalized the index-freshness and one-store problems; the AAAI '24 RGB benchmark and the EMNLP '24 knowledge-conflicts survey measure the downstream symptom; practitioners have been writing about it through 2026 (dev.to's *RAG Is a Data Engineering Problem*, dbi-services' pgvector CDC series).
+
+What hasn't been published is the **measured relationship** between index-freshness and downstream answer correctness — a freshness SLO plotted against answer accuracy, per failure mechanism. So this project builds it.
+
+
 
 Live demo: https://freshness-lab.vercel.app
 
@@ -107,17 +115,25 @@ Tests: `pytest backend/tests/`
 
 ---
 
-## Where this comes from
+## Related Work
 
-The idea sits on top of a chain of work on retrieval, temporal degradation, and vector-index freshness:
+### Foundational RAG pattern
+- Lewis et al., *RAG for Knowledge-Intensive NLP Tasks*
 
-- Lewis et al., *Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks* — the base RAG pattern.
-- Lazaridou et al., on temporal generalization in language models — models go stale against a moving world.
-- Longpre et al. and Chen et al., on knowledge conflict — what happens when retrieved context disagrees with parametric memory, which is exactly the moment a stale snapshot does damage.
-- Subramanya et al. (DiskANN) and the streaming-update line through SPFresh — keeping an ANN index fresh under continuous writes at scale.
-- Production vector-database work (Manu, AnalyticDB-V, VBase) — the systems that have to solve freshness for real.
+### Retrieval + reasoning under stale or conflicting context
+- Chen et al., *Benchmarking LLMs in RAG* (AAAI 2024)
+- Chen et al., *Knowledge Conflicts for LLMs* (EMNLP 2024)
+- Longpre et al., work on knowledge conflict in LLMs
+- Lazaridou et al., temporal generalization and model staleness
 
-The thread that runs through all of it: a language model goes stale, RAG exists to give it live retrieval, and that only works if the retrieval layer is actually fresh. This demo zooms in on the failure that survives even when retrieval looks perfectly healthy.
+### Vector index freshness and ANN update systems
+- Xu et al., *SPFresh* (SOSP 2023)
+- Zhang et al., *VBASE* (OSDI 2023)
+- Subramanya et al., *DiskANN*
+- VLDB / production systems (AnalyticDB-V, other vector DBMS work)
+
+### End-to-end production systems addressing freshness
+- MongoDB, *Automated Embedding in Atlas* (2026)
 
 ---
 
