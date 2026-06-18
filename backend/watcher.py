@@ -44,6 +44,9 @@ def _run() -> None:
                     # changed_at from the event's cluster time (server clock, honest TTF)
                     cluster_ts = event.get("clusterTime")
                     changed_at = cluster_ts.as_datetime() if cluster_ts else None
+                    # TODO(audit): mode is read at event-processing time, not at change-event
+                    # time (cluster_ts). A mode switch between the DB write and here can
+                    # mis-label the ledger row and trigger the wrong sync path. See audit Inv-4.
                     pipeline.handle_change(
                         doc_name=full_doc["name"],
                         changed_fields=changed,

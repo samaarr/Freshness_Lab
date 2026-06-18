@@ -85,7 +85,12 @@ def get_mode():
 @app.post("/api/mode")
 def set_mode(req: ModeRequest):
     try:
-        return {"mode": mode_state.set_mode(req.mode)}
+        prev = mode_state.get_mode()
+        new_mode = mode_state.set_mode(req.mode)
+        result: dict = {"mode": new_mode}
+        if prev == "baseline" and new_mode == "live":
+            result["reconciled"] = pipeline.reconcile_pending()
+        return result
     except ValueError as exc:
         raise HTTPException(422, str(exc))
 

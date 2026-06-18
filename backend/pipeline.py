@@ -102,6 +102,50 @@ def handle_change(doc_name: str, changed_fields: set[str], full_doc: dict,
     return route
 
 
+def reconcile_pending() -> dict:
+    """Switch-to-live backlog reconciliation.
+
+    Re-syncs every doc that has pending (synced_at=None) baseline rows, then
+    closes those rows with an honest synced_at and computed ttf_ms.  A doc
+    with any semantic pending row gets sync_semantic (covers factual drift too);
+    a doc with only factual rows gets sync_factual (no re-embed needed).
+    Called by /api/mode when transitioning baseline → live.
+    """
+    synced_at = utcnow()
+    pending_by_doc: dict[str, list[dict]] = {}
+    for row in db.ledger().find({"synced_at": None}):
+        pending_by_doc.setdefault(row["doc_name"], []).append(row)
+
+    if not pending_by_doc:
+        return {"docs_synced": 0, "rows_closed": 0}
+
+    docs_synced = 0
+    rows_closed = 0
+    for doc_name, rows in pending_by_doc.items():
+        doc = db.services().find_one({"name": doc_name})
+        if not doc:
+            continue
+        has_semantic = any(r["field_class"] == "semantic" for r in rows)
+        if has_semantic:
+            sync_semantic(doc)
+        else:
+            sync_factual(doc)
+        for row in rows:
+            changed_at = _norm(row["changed_at"])
+            ttf_ms = max(0, int((synced_at - changed_at).total_seconds() * 1000))
+            db.ledger().update_one(
+                {"_id": row["_id"]},
+                {"$set": {"synced_at": synced_at, "ttf_ms": ttf_ms}},
+            )
+            rows_closed += 1
+        docs_synced += 1
+
+    events.publish("reconcile", {"docs_synced": docs_synced, "rows_closed": rows_closed})
+    return {"docs_synced": docs_synced, "rows_closed": rows_closed}
+
+
+# TODO(audit): reset_all re-embeds from current state but does not revert runbook_text
+# or status to seed defaults. A "restore defaults" endpoint is needed. See audit Inv-7/Root-E.
 def reset_all() -> dict:
     """Demo reset: re-embed all docs from current state, wipe entire ledger so TTF starts fresh."""
     now = utcnow()
