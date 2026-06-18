@@ -126,13 +126,14 @@ const whisper   = { fontSize: 'var(--fs-12)', color: 'var(--text-3)', fontStyle:
 /* ── main component ──────────────────────────────────────── */
 export default function DivergenceView({
   services, mode, extraSeconds, onChanged, sweepTick,
-  sweepOn, onSweepToggle, sweepCountdown, lastRebuildAgo,
+  sweepOn, onSweepToggle, sweepCountdown, lastRebuildAgo, lastRebuildAt,
 }) {
   const dish = services.find((s) => s.name === DISH) || services[0] || {}
-  const [thread, setThread]   = useState([])
-  const [busy, setBusy]       = useState(false)
-  const [inspect, setInspect] = useState(null)
-  const [q, setQ]             = useState('')
+  const [thread, setThread]         = useState([])
+  const [busy, setBusy]             = useState(false)
+  const [inspect, setInspect]       = useState(null)
+  const [q, setQ]                   = useState('')
+  const [selectedRecipe, setSelectedRecipe] = useState(null)
 
   const [flow, setFlow]       = useState({ node: null, caption: '' })
   const flowTimers            = useRef([])
@@ -158,6 +159,9 @@ export default function DivergenceView({
   const hasProv        = !!prov
   const forkDiverged   = hasProv && prov.context_status !== prov.truth_status
   const versionDiverged = hasProv && prov.embedding_version_used !== dish.embedding_version
+
+  /* clear recipe selection when the demo resets or rebuilds */
+  useEffect(() => { setSelectedRecipe(null) }, [lastRebuildAt])
 
   /* ── animation runner ───────────────────────────────────── */
   const runFlow = useCallback((steps) => {
@@ -211,6 +215,7 @@ export default function DivergenceView({
 
   const setRecipe = async (text) => {
     if (!text) return
+    setSelectedRecipe(text)  // update displayed value immediately, before network round-trip
     runFlow(live ? FLOW_STEPS['semantic-live'] : FLOW_STEPS['semantic-baseline'])
     await api.patchService(DISH, { runbook_text: text })
     onChanged()
@@ -271,7 +276,7 @@ export default function DivergenceView({
           <div style={cardTitle}>Change the semantic text</div>
           <div style={whisper}>(the chef rewrites the description)</div>
           <div style={{ marginTop: 'var(--s-4)' }}>
-            <Listbox options={RECIPE_OPTIONS} placeholder="choose a recipe rewrite…" onSelect={setRecipe} />
+            <Listbox options={RECIPE_OPTIONS} value={selectedRecipe} placeholder="choose a recipe rewrite…" onSelect={setRecipe} />
           </div>
           <div style={{ fontFamily: 'var(--font-ui)', fontSize: 'var(--fs-11h)', color: 'var(--text-3)', marginTop: 'var(--s-4)' }}>
             <Id>runbook_text</Id> field · mechanism A · re-embed → new vector

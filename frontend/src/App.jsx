@@ -125,6 +125,7 @@ export default function App() {
             onChanged={refresh} sweepTick={sweepTick}
             sweepOn={sweepOn} onSweepToggle={() => setSweepOn(o => !o)}
             sweepCountdown={sweepCountdown} lastRebuildAgo={lastRebuildAgo}
+            lastRebuildAt={lastRebuildAt}
           />
         : <BenchmarkTab />}
     </div>
