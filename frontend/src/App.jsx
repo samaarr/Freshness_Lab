@@ -27,6 +27,10 @@ export default function App() {
   const [lastRebuildAt, setLastRebuildAt]   = useState(null)
   const lastRebuildInitRef                  = useRef(false)
 
+  /* connectivity */
+  const [backendDown, setBackendDown] = useState(false)
+  const everLoadedRef                 = useRef(false)
+
   const refresh = useCallback(async () => {
     try {
       const [svc, m, bench] = await Promise.all([api.services(), api.mode(), api.benchResults()])
@@ -34,7 +38,12 @@ export default function App() {
       setServices(svc)
       setMode(m.mode)
       setTtf(bench.ttf)
-    } catch { /* backend not up yet — UI stays calm */ }
+      everLoadedRef.current = true
+      setBackendDown(false)
+    } catch {
+      /* suppress during initial load; show banner once we've had good data */
+      if (everLoadedRef.current) setBackendDown(true)
+    }
   }, [])
 
   useEffect(() => { refresh() }, [refresh])
@@ -87,6 +96,18 @@ export default function App() {
 
   return (
     <div>
+      {backendDown && (
+        <div style={{
+          position: 'fixed', bottom: 16, right: 16, zIndex: 100,
+          background: 'var(--red-bg)', border: '1px solid var(--red-border)',
+          borderRadius: 'var(--radius)', padding: '8px 14px',
+          fontSize: 'var(--fs-13)', color: 'var(--red-text)',
+          boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+        }}>
+          connection lost — retrying
+        </div>
+      )}
+
       <CommandBar
         mode={mode} onMode={switchMode} ttf={ttf} onRebuild={rebuild}
         onReset={resetDemo}
